@@ -1,19 +1,50 @@
 #!/usr/bin/env python3
 """
-Simulate drone data and publish to MQTT.
+Simulate drone data and publish to MQTT using the new frame structure.
 
 Modes:
-- frames (default): one MQTT message per video frame with many drones inside
-- detections: legacy single-drone circular motion (original behavior)
+- frames (default): one MQTT message per video frame with many objects inside
+- detections: legacy single-drone circular motion (deprecated, kept for compatibility)
+
+New structure format:
+{
+    "fram_id": "string",
+    "cam_id": "string",
+    "token_id": {
+        "camera_info": {
+            "name": "string",
+            "sort": "string",
+            "location": "string",
+            "institute": "string"
+        }
+    },
+    "timestamp": "ISO string",
+    "image_info": {
+        "width": int,
+        "height": int
+    },
+    "objects": [
+        {
+            "obj_id": "string",
+            "type": "string",
+            "lat": float,
+            "lng": float,
+            "alt": float,
+            "speed_kt": float
+        }
+    ]
+}
 
 Examples:
-    # Frames mode (recommended)
+    # Frames mode (recommended) - new structure
     python drone_mqtt_simulator.py \
         --mode frames --host localhost --topic drones/frames \
         --center-lat 13.7563 --center-lon 100.5018 \
-        --num-drones 1 --interval-s 0.5 --radius-m 120
+        --num-drones 1 --interval-s 0.5 --radius-m 120 \
+        --cam-id camera-1 --camera-name "Test Camera" \
+        --camera-sort outdoor --camera-location Bangkok --camera-institute TESA
 
-    # Legacy detections mode (original)
+    # Legacy detections mode (deprecated)
     python drone_mqtt_simulator.py \
         --mode detections --host localhost --topic drones/detections \
         --center-lat 13.7563 --center-lon 100.5018 \
@@ -162,12 +193,12 @@ def parse_args() -> argparse.Namespace:
     # Frames mode params
     parser.add_argument("--num-drones", type=int, default=1, help="How many drones per frame.")
     parser.add_argument(
-        "--speed-range-mps",
+        "--speed-range-kt",
         type=float,
         nargs=2,
         metavar=("MIN", "MAX"),
-        default=[3.0, 12.0],
-        help="Speed range for drones in m/s (min max).",
+        default=[6.0, 24.0],
+        help="Speed range for drones in knots (min max).",
     )
     parser.add_argument("--noise-level-m", type=float, default=3.0, help="GPS jitter standard deviation in meters.")
     parser.add_argument("--miss-rate", type=float, default=0.10, help="Probability per frame to miss a real drone.")
@@ -177,8 +208,11 @@ def parse_args() -> argparse.Namespace:
         default=0.03,
         help="Probability per frame to add a false detection.",
     )
-    parser.add_argument("--source-id", default="camera-1", help="Source/camera identifier.")
-    parser.add_argument("--image-string", default="450697839702995473577", help="Fixed fake image base64 string.")
+    parser.add_argument("--cam-id", default="camera-1", help="Camera identifier.")
+    parser.add_argument("--camera-name", default="Test Camera", help="Camera name.")
+    parser.add_argument("--camera-sort", default="outdoor", help="Camera sort/type.")
+    parser.add_argument("--camera-location", default="Bangkok", help="Camera location.")
+    parser.add_argument("--camera-institute", default="TESA", help="Camera institute.")
 
     # Legacy detections mode params
     parser.add_argument("--drone-id", default="simulated-drone-1", help="Identifier for the single simulated drone.")
@@ -205,8 +239,8 @@ def validate_args(args: argparse.Namespace) -> bool:
         if args.num_drones < 1:
             print("num-drones must be >= 1.", file=sys.stderr)
             return False
-        if len(args.speed_range_mps) != 2 or args.speed_range_mps[0] <= 0 or args.speed_range_mps[0] > args.speed_range_mps[1]:
-            print("speed-range-mps must be two numbers: MIN > 0 and MIN <= MAX.", file=sys.stderr)
+        if len(args.speed_range_kt) != 2 or args.speed_range_kt[0] <= 0 or args.speed_range_kt[0] > args.speed_range_kt[1]:
+            print("speed-range-kt must be two numbers: MIN > 0 and MIN <= MAX.", file=sys.stderr)
             return False
         if not (0.0 <= args.miss_rate < 1.0):
             print("miss-rate must be in [0, 1).", file=sys.stderr)
@@ -219,7 +253,11 @@ def validate_args(args: argparse.Namespace) -> bool:
 
 def init_frames_states(args: argparse.Namespace) -> List[DroneState]:
     states: List[DroneState] = []
-    speed_min, speed_max = args.speed_range_mps
+    # Convert knots to m/s for internal calculations (1 knot = 0.514444 m/s)
+    KNOTS_TO_MPS = 0.514444
+    speed_min_kt, speed_max_kt = args.speed_range_kt
+    speed_min = speed_min_kt * KNOTS_TO_MPS
+    speed_max = speed_max_kt * KNOTS_TO_MPS
 
     for i in range(args.num_drones):
         drone_id = f"sim-{i + 1}"
@@ -268,6 +306,7 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
     frame_id = 0
     dt = args.interval_s
     updates_remaining = args.updates if args.updates > 0 else None
+    KNOTS_TO_MPS = 0.514444  # Conversion factor
 
     client.loop_start()
     try:
@@ -276,16 +315,17 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
             now_iso = datetime.now(timezone.utc).isoformat()
 
             for st in states:
-                # base speed with small per-frame noise
-                current_speed = st.speed_base_mps * random.uniform(0.9, 1.1)
+                # base speed with small per-frame noise (in m/s for calculations)
+                current_speed_mps = st.speed_base_mps * random.uniform(0.9, 1.1)
+                current_speed_kt = current_speed_mps / KNOTS_TO_MPS  # Convert to knots
 
                 # update position
                 if st.motion == "circle":
-                    st.angle_rad = (st.angle_rad + (current_speed / st.radius_m) * dt) % (2 * math.pi)
+                    st.angle_rad = (st.angle_rad + (current_speed_mps / st.radius_m) * dt) % (2 * math.pi)
                     lat, lon = position_on_circle(args.center_lat, args.center_lon, st.radius_m, st.angle_rad)
                 else:
-                    delta_north_m = current_speed * dt * math.cos(st.bearing_rad)
-                    delta_east_m = current_speed * dt * math.sin(st.bearing_rad)
+                    delta_north_m = current_speed_mps * dt * math.cos(st.bearing_rad)
+                    delta_east_m = current_speed_mps * dt * math.sin(st.bearing_rad)
                     st.lat = st.lat + (delta_north_m / METERS_PER_DEGREE_LAT)
                     st.lon = st.lon + (delta_east_m / meters_per_degree_lon(st.lat))
                     lat, lon = st.lat, st.lon
@@ -302,9 +342,9 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
                 wobble_phase = st.angle_rad if st.motion == "circle" else t
                 alt = st.base_alt_m + st.wobble_m * math.sin(wobble_phase)
 
-                # bbox + confidence from distance and speed
+                # bbox + confidence from distance and speed (using m/s for calculations)
                 dx_east_m, dy_north_m = latlon_to_m_offsets(lat, lon, args.center_lat, args.center_lon)
-                bbox, confidence = compute_bbox_and_conf(dx_east_m, dy_north_m, current_speed)
+                bbox, confidence = compute_bbox_and_conf(dx_east_m, dy_north_m, current_speed_mps)
 
                 # missed detection?
                 if random.random() < args.miss_rate:
@@ -312,15 +352,12 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
                 else:
                     objects.append(
                         {
-                            "drone_id": st.drone_id,
+                            "obj_id": st.drone_id,  # Changed from drone_id to obj_id
                             "type": st.type,
                             "lat": round(lat, 7),
-                            "lon": round(lon, 7),
-                            "alt_m": round(alt, 2),
-                            "speed_mps": round(current_speed, 2),
-                            "bbox": [bbox[0], bbox[1], bbox[2], bbox[3]],
-                            "confidence": confidence,
-                            "timestamp": now_iso,
+                            "lng": round(lon, 7),  # Changed from lon to lng
+                            "alt": round(alt, 2),  # Changed from alt_m to alt
+                            "speed_kt": round(current_speed_kt, 2),  # Changed from speed_mps to speed_kt
                         }
                     )
 
@@ -331,27 +368,38 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
                 dy = random.uniform(-VIEW_HALF_WIDTH_M, VIEW_HALF_WIDTH_M)
                 lat_fp = args.center_lat + (dy / METERS_PER_DEGREE_LAT)
                 lon_fp = args.center_lon + (dx / meters_per_degree_lon(args.center_lat))
-                bbox_fp, conf_fp = compute_bbox_and_conf(dx, dy, current_speed_mps=random.uniform(0.0, 2.0))
+                speed_fp_mps = random.uniform(0.0, 2.0)
+                speed_fp_kt = speed_fp_mps / KNOTS_TO_MPS
+                bbox_fp, conf_fp = compute_bbox_and_conf(dx, dy, current_speed_mps=speed_fp_mps)
                 objects.append(
                     {
-                        "drone_id": f"fp-{uuid.uuid4().hex[:6]}",
+                        "obj_id": f"fp-{uuid.uuid4().hex[:6]}",
                         "type": "unknown",
                         "lat": round(lat_fp, 7),
-                        "lon": round(lon_fp, 7),
-                        "alt_m": round(args.altitude_m + random.uniform(-5.0, 5.0), 2),
-                        "speed_mps": round(random.uniform(0.0, 2.0), 2),
-                        "bbox": [bbox_fp[0], bbox_fp[1], bbox_fp[2], bbox_fp[3]],
-                        "confidence": round(clamp(conf_fp, 0.30, 0.50), 2),
-                        "timestamp": now_iso,
+                        "lng": round(lon_fp, 7),
+                        "alt": round(args.altitude_m + random.uniform(-5.0, 5.0), 2),
+                        "speed_kt": round(speed_fp_kt, 2),
                     }
                 )
 
+            # New structure payload
             payload = {
-                "frame_id": frame_id,
+                "fram_id": str(frame_id),  # Changed from frame_id (int) to fram_id (string)
+                "cam_id": args.cam_id,  # Changed from source_id to cam_id
+                "token_id": {
+                    "camera_info": {
+                        "name": args.camera_name,
+                        "sort": args.camera_sort,
+                        "location": args.camera_location,
+                        "institute": args.camera_institute,
+                    }
+                },
                 "timestamp": now_iso,
-                "source_id": args.source_id,
+                "image_info": {
+                    "width": IMAGE_WIDTH,
+                    "height": IMAGE_HEIGHT,
+                },
                 "objects": objects,
-                "image_base64": args.image_string,  # fixed fake string as requested
             }
 
             info = client.publish(args.topic, json.dumps(payload), qos=args.qos, retain=args.retain)

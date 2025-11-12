@@ -1,78 +1,124 @@
-# TESA Drone Backend
+# Drone MQTT Simulator
 
-Backend API server for TESA drone tracking system with PostgreSQL database, MQTT ingestion, and WebSocket support.
+Python simulator for generating drone detection data and publishing to MQTT using the new frame structure.
 
-## Features
+## New Structure Format
 
-- Drone detection tracking and storage
-- Frame-based detection processing
-- Mark/Zone management for map annotations
-- RESTful API endpoints
-- WebSocket real-time updates
-- MQTT message ingestion
-- PostgreSQL database with Prisma ORM
+The simulator now publishes data in the following format:
+
+```json
+{
+  "fram_id": "string",
+  "cam_id": "string",
+  "token_id": {
+    "camera_info": {
+      "name": "string",
+      "sort": "string",
+      "location": "string",
+      "institute": "string"
+    }
+  },
+  "timestamp": "ISO 8601 string",
+  "image_info": {
+    "width": 1920,
+    "height": 1080
+  },
+  "objects": [
+    {
+      "obj_id": "string",
+      "type": "string",
+      "lat": 0.0,
+      "lng": 0.0,
+      "alt": 0.0,
+      "speed_kt": 0.0
+    }
+  ]
+}
+```
 
 ## Installation
 
-1. Install dependencies:
+1. Install Python dependencies:
 ```bash
-npm install
+pip install paho-mqtt
 ```
 
-2. Set up database (PostgreSQL):
+## Usage
+
+### Basic Example
+
 ```bash
-docker-compose up -d db
+python drone_mqtt_simulator.py \
+    --mode frames \
+    --host localhost \
+    --topic drones/frames \
+    --center-lat 13.7563 \
+    --center-lon 100.5018 \
+    --num-drones 2 \
+    --interval-s 0.5 \
+    --radius-m 120 \
+    --cam-id camera-1 \
+    --camera-name "Test Camera" \
+    --camera-sort outdoor \
+    --camera-location Bangkok \
+    --camera-institute TESA
 ```
 
-3. Configure environment variables:
-```bash
-cp .env.example .env
-# Edit .env with your DATABASE_URL
-```
+### Parameters
 
-4. Run database migrations:
-```bash
-npm run prisma:migrate
-```
+**Connection:**
+- `--host`: MQTT broker hostname (default: localhost)
+- `--port`: MQTT broker port (default: 1883)
+- `--topic`: MQTT topic (default: drones/frames)
+- `--qos`: MQTT QoS level 0-2 (default: 0)
 
-## Development
+**Scene:**
+- `--center-lat`: Latitude of scene center (required)
+- `--center-lon`: Longitude of scene center (required)
+- `--interval-s`: Seconds between frames (default: 0.5)
+- `--radius-m`: Orbit radius in meters (default: 120.0)
+- `--altitude-m`: Base altitude in meters (default: 120.0)
 
-Start development server:
-```bash
-npm run dev
-```
+**Frames Mode:**
+- `--num-drones`: Number of objects per frame (default: 1)
+- `--speed-range-kt`: Speed range in knots [MIN MAX] (default: 6.0 24.0)
+- `--cam-id`: Camera identifier (default: camera-1)
+- `--camera-name`: Camera name (default: Test Camera)
+- `--camera-sort`: Camera sort/type (default: outdoor)
+- `--camera-location`: Camera location (default: Bangkok)
+- `--camera-institute`: Camera institute (default: TESA)
+- `--noise-level-m`: GPS jitter in meters (default: 3.0)
+- `--miss-rate`: Probability to miss detection (default: 0.10)
+- `--false-positive-rate`: Probability for false positives (default: 0.03)
 
-The server will run on `http://localhost:3000`
+## Speed Units
 
-## API Endpoints
+- The simulator uses **knots (kt)** for speed in the published data
+- Internal calculations use m/s for physics simulation
+- Conversion: 1 knot = 0.514444 m/s
 
-### Marks
-- `GET /marks` - Get all marks
-- `GET /marks/:id` - Get mark by ID
-- `POST /marks` - Create a new mark
-- `PUT /marks/:id` - Update a mark
-- `DELETE /marks/:id` - Delete a mark
+## Example Output
 
-### Drones
-- `GET /drone/latest` - Get latest drone detection
-- `GET /drone/history` - Get drone detection history
-- `GET /drone/path` - Get drone flight path
+Each frame will contain:
+- `fram_id`: Sequential frame identifier (as string)
+- `cam_id`: Camera identifier
+- `token_id.camera_info`: Camera metadata
+- `timestamp`: ISO 8601 timestamp
+- `image_info`: Image dimensions
+- `objects`: Array of detected objects with:
+  - `obj_id`: Object identifier
+  - `type`: Object type (optional)
+  - `lat`, `lng`: Position coordinates
+  - `alt`: Altitude in meters
+  - `speed_kt`: Speed in knots
 
-### Health
-- `GET /health` - Health check
-- `GET /ready` - Readiness check
+## Integration with Backend
 
-## API Documentation
-
-Swagger UI available at: `http://localhost:3000/docs`
-
-## Database Schema
-
-See `prisma/schema.prisma` for the complete database schema.
-
-## WebSocket
-
-Connect to `ws://localhost:3000/ws` for real-time drone updates.
+This simulator is designed to work with the Backend_Tesa system:
+1. Start the backend server
+2. Start MQTT broker (via docker-compose)
+3. Run this simulator
+4. Data will be ingested and broadcast via WebSocket
 
 ## License
 
