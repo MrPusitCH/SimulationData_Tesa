@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     # Shared motion params
     parser.add_argument("--radius-m", type=float, default=120.0, help="Base orbit radius for circle motion.")
     parser.add_argument("--altitude-m", type=float, default=120.0, help="Base altitude in meters.")
-    parser.add_argument("--altitude-wobble-m", type=float, default=0.0, help="Altitude variation amplitude in meters.")
+    parser.add_argument("--altitude-wobble-m", type=float, default=8.0, help="Altitude variation amplitude in meters.")
 
     # Frames mode params
     parser.add_argument("--num-drones", type=int, default=1, help="How many drones per frame.")
@@ -353,10 +353,13 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
                     lat += noise_north_m / METERS_PER_DEGREE_LAT
                     lon += noise_east_m / meters_per_degree_lon(lat)
 
-                # altitude wobble
+                # altitude wobble - เพิ่มการเปลี่ยนแปลงอัลติจูดให้มากขึ้น
                 t = time.time()
                 wobble_phase = st.angle_rad if st.motion == "circle" else t
-                alt = st.base_alt_m + st.wobble_m * math.sin(wobble_phase)
+                # เพิ่มการเปลี่ยนแปลงอัลติจูดให้มากขึ้น (sin wave + random variation)
+                base_wobble = st.wobble_m * math.sin(wobble_phase)
+                random_alt_variation = random.uniform(-2.0, 2.0)  # ±2 เมตร random variation
+                alt = st.base_alt_m + base_wobble + random_alt_variation
 
                 # bbox + confidence from distance and speed (using m/s for calculations)
                 dx_east_m, dy_north_m = latlon_to_m_offsets(lat, lon, args.center_lat, args.center_lon)
