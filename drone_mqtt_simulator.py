@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     # Shared motion params
     parser.add_argument("--radius-m", type=float, default=120.0, help="Base orbit radius for circle motion.")
     parser.add_argument("--altitude-m", type=float, default=120.0, help="Base altitude in meters.")
-    parser.add_argument("--altitude-wobble-m", type=float, default=8.0, help="Altitude variation amplitude in meters.")
+    parser.add_argument("--altitude-wobble-m", type=float, default=0.0, help="Altitude variation amplitude in meters.")
 
     # Frames mode params
     parser.add_argument("--num-drones", type=int, default=1, help="How many drones per frame.")
@@ -200,7 +200,7 @@ def parse_args() -> argparse.Namespace:
         default=[6.0, 24.0],
         help="Speed range for drones in knots (min max).",
     )
-    parser.add_argument("--noise-level-m", type=float, default=8.0, help="GPS jitter standard deviation in meters.")
+    parser.add_argument("--noise-level-m", type=float, default=3.0, help="GPS jitter standard deviation in meters.")
     parser.add_argument("--miss-rate", type=float, default=0.10, help="Probability per frame to miss a real drone.")
     parser.add_argument(
         "--false-positive-rate",
@@ -331,49 +331,32 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
             now_iso = datetime.now(timezone.utc).isoformat()
 
             for st in states:
-                # base speed with moderate per-frame variation (in m/s for calculations)
-                # เพิ่มการเปลี่ยนแปลงความเร็วให้มากขึ้นเล็กน้อย
-                current_speed_mps = st.speed_base_mps * random.uniform(0.85, 1.15)
+                # base speed with small per-frame noise (in m/s for calculations)
+                current_speed_mps = st.speed_base_mps * random.uniform(0.9, 1.1)
                 current_speed_kt = current_speed_mps / KNOTS_TO_MPS  # Convert to knots
 
                 # update position
                 if st.motion == "circle":
-                    # เพิ่มความเร็วในการหมุนให้มากขึ้นเล็กน้อย
-                    angular_speed_multiplier = random.uniform(0.92, 1.08)  # เพิ่มช่วงให้มากขึ้น
-                    st.angle_rad = (st.angle_rad + (current_speed_mps / st.radius_m) * dt * angular_speed_multiplier) % (2 * math.pi)
+                    st.angle_rad = (st.angle_rad + (current_speed_mps / st.radius_m) * dt) % (2 * math.pi)
                     lat, lon = position_on_circle(args.center_lat, args.center_lon, st.radius_m, st.angle_rad)
                 else:
-                    # เพิ่มการเปลี่ยนแปลงทิศทางเล็กน้อย
-                    bearing_variation = random.uniform(-0.15, 0.15)  # เพิ่มเป็น ±0.15 radians (~±8.6 degrees)
-                    adjusted_bearing = st.bearing_rad + bearing_variation
-                    delta_north_m = current_speed_mps * dt * math.cos(adjusted_bearing)
-                    delta_east_m = current_speed_mps * dt * math.sin(adjusted_bearing)
+                    delta_north_m = current_speed_mps * dt * math.cos(st.bearing_rad)
+                    delta_east_m = current_speed_mps * dt * math.sin(st.bearing_rad)
                     st.lat = st.lat + (delta_north_m / METERS_PER_DEGREE_LAT)
                     st.lon = st.lon + (delta_east_m / meters_per_degree_lon(st.lat))
                     lat, lon = st.lat, st.lon
 
-                # GPS noise (meters -> degrees) - เพิ่ม noise ให้มากขึ้น
+                # GPS noise (meters -> degrees)
                 if args.noise_level_m > 0.0:
-                    # เพิ่ม noise ให้มีการเปลี่ยนแปลงมากขึ้น แต่ไม่เว่อ
                     noise_north_m = random.gauss(0.0, args.noise_level_m)
                     noise_east_m = random.gauss(0.0, args.noise_level_m)
                     lat += noise_north_m / METERS_PER_DEGREE_LAT
                     lon += noise_east_m / meters_per_degree_lon(lat)
-                    
-                    # เพิ่มการเปลี่ยนแปลงตำแหน่งเล็กน้อยเพิ่มเติม (เพื่อให้เห็นการเปลี่ยนแปลงชัดเจนขึ้น)
-                    # เพิ่มการเปลี่ยนแปลงแบบสุ่มเล็กน้อย ±2-4 เมตร
-                    additional_north = random.uniform(-4.0, 4.0)  # ±4 เมตร
-                    additional_east = random.uniform(-4.0, 4.0)   # ±4 เมตร
-                    lat += additional_north / METERS_PER_DEGREE_LAT
-                    lon += additional_east / meters_per_degree_lon(lat)
 
-                # altitude wobble - เพิ่มการเปลี่ยนแปลงอัลติจูด
+                # altitude wobble
                 t = time.time()
                 wobble_phase = st.angle_rad if st.motion == "circle" else t
-                # เพิ่มการเปลี่ยนแปลงอัลติจูดให้มากขึ้น (sin wave + random variation)
-                base_wobble = st.wobble_m * math.sin(wobble_phase)
-                random_alt_variation = random.uniform(-2.0, 2.0)  # ±2 เมตร random variation
-                alt = st.base_alt_m + base_wobble + random_alt_variation
+                alt = st.base_alt_m + st.wobble_m * math.sin(wobble_phase)
 
                 # bbox + confidence from distance and speed (using m/s for calculations)
                 dx_east_m, dy_north_m = latlon_to_m_offsets(lat, lon, args.center_lat, args.center_lon)
