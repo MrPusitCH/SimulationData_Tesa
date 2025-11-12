@@ -10,14 +10,7 @@ New structure format:
 {
     "fram_id": "string",
     "cam_id": "string",
-    "token_id": {
-        "camera_info": {
-            "name": "string",
-            "sort": "string",
-            "location": "string",
-            "institute": "string"
-        }
-    },
+    "token_id": "string",  # Just the token string - backend will fetch camera_info from API
     "timestamp": "ISO string",
     "image_info": {
         "width": int,
@@ -36,13 +29,20 @@ New structure format:
 }
 
 Examples:
-    # Frames mode (recommended) - new structure
+    # Frames mode (recommended) - test with backend
     python drone_mqtt_simulator.py \
         --mode frames --host localhost --topic drones/frames \
         --center-lat 13.7563 --center-lon 100.5018 \
         --num-drones 1 --interval-s 0.5 --radius-m 120 \
-        --cam-id camera-1 --camera-name "Test Camera" \
-        --camera-sort outdoor --camera-location Bangkok --camera-institute TESA
+        --cam-id e8a76237-df96-4a6a-9375-baa4d74f5f12 \
+        --token 257c87b4-9469-44fe-9132-8937f69723bd
+
+    # Quick test (5 frames)
+    python drone_mqtt_simulator.py \
+        --mode frames --host localhost --topic drones/frames \
+        --center-lat 13.7563 --center-lon 100.5018 \
+        --num-drones 2 --interval-s 1.0 --radius-m 120 \
+        --updates 5
 
     # Legacy detections mode (deprecated)
     python drone_mqtt_simulator.py \
@@ -188,7 +188,7 @@ def parse_args() -> argparse.Namespace:
     # Shared motion params
     parser.add_argument("--radius-m", type=float, default=120.0, help="Base orbit radius for circle motion.")
     parser.add_argument("--altitude-m", type=float, default=120.0, help="Base altitude in meters.")
-    parser.add_argument("--altitude-wobble-m", type=float, default=0.0, help="Altitude variation amplitude in meters.")
+    parser.add_argument("--altitude-wobble-m", type=float, default=8.0, help="Altitude variation amplitude in meters.")
 
     # Frames mode params
     parser.add_argument("--num-drones", type=int, default=1, help="How many drones per frame.")
@@ -200,7 +200,7 @@ def parse_args() -> argparse.Namespace:
         default=[6.0, 24.0],
         help="Speed range for drones in knots (min max).",
     )
-    parser.add_argument("--noise-level-m", type=float, default=3.0, help="GPS jitter standard deviation in meters.")
+    parser.add_argument("--noise-level-m", type=float, default=8.0, help="GPS jitter standard deviation in meters.")
     parser.add_argument("--miss-rate", type=float, default=0.10, help="Probability per frame to miss a real drone.")
     parser.add_argument(
         "--false-positive-rate",
@@ -208,7 +208,8 @@ def parse_args() -> argparse.Namespace:
         default=0.03,
         help="Probability per frame to add a false detection.",
     )
-    parser.add_argument("--cam-id", default="camera-1", help="Camera identifier.")
+    parser.add_argument("--cam-id", default="e8a76237-df96-4a6a-9375-baa4d74f5f12", help="Camera identifier.")
+    parser.add_argument("--token", default="257c87b4-9469-44fe-9132-8937f69723bd", help="Camera token for API authentication.")
     parser.add_argument("--camera-name", default="Test Camera", help="Camera name.")
     parser.add_argument("--camera-sort", default="outdoor", help="Camera sort/type.")
     parser.add_argument("--camera-location", default="Bangkok", help="Camera location.")
@@ -308,39 +309,71 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
     updates_remaining = args.updates if args.updates > 0 else None
     KNOTS_TO_MPS = 0.514444  # Conversion factor
 
+    # Print startup info
+    print(f"\n🚀 Starting drone simulator (frames mode)")
+    print(f"   Topic: {args.topic}")
+    print(f"   Broker: {args.host}:{args.port}")
+    print(f"   Camera ID: {args.cam_id}")
+    print(f"   Token: {args.token[:8]}...")
+    print(f"   Drones: {args.num_drones}")
+    print(f"   Interval: {args.interval_s}s")
+    print(f"   Updates: {'continuous' if updates_remaining is None else updates_remaining}")
+    print(f"   Center: ({args.center_lat}, {args.center_lon})")
+    print(f"\n📡 Publishing frames... (Press Ctrl+C to stop)\n")
+
     client.loop_start()
+    # Wait a moment for connection
+    time.sleep(0.5)
+    
     try:
         while updates_remaining is None or updates_remaining > 0:
             objects = []
             now_iso = datetime.now(timezone.utc).isoformat()
 
             for st in states:
-                # base speed with small per-frame noise (in m/s for calculations)
-                current_speed_mps = st.speed_base_mps * random.uniform(0.9, 1.1)
+                # base speed with moderate per-frame variation (in m/s for calculations)
+                # เพิ่มการเปลี่ยนแปลงความเร็วให้มากขึ้นเล็กน้อย
+                current_speed_mps = st.speed_base_mps * random.uniform(0.85, 1.15)
                 current_speed_kt = current_speed_mps / KNOTS_TO_MPS  # Convert to knots
 
                 # update position
                 if st.motion == "circle":
-                    st.angle_rad = (st.angle_rad + (current_speed_mps / st.radius_m) * dt) % (2 * math.pi)
+                    # เพิ่มความเร็วในการหมุนให้มากขึ้นเล็กน้อย
+                    angular_speed_multiplier = random.uniform(0.92, 1.08)  # เพิ่มช่วงให้มากขึ้น
+                    st.angle_rad = (st.angle_rad + (current_speed_mps / st.radius_m) * dt * angular_speed_multiplier) % (2 * math.pi)
                     lat, lon = position_on_circle(args.center_lat, args.center_lon, st.radius_m, st.angle_rad)
                 else:
-                    delta_north_m = current_speed_mps * dt * math.cos(st.bearing_rad)
-                    delta_east_m = current_speed_mps * dt * math.sin(st.bearing_rad)
+                    # เพิ่มการเปลี่ยนแปลงทิศทางเล็กน้อย
+                    bearing_variation = random.uniform(-0.15, 0.15)  # เพิ่มเป็น ±0.15 radians (~±8.6 degrees)
+                    adjusted_bearing = st.bearing_rad + bearing_variation
+                    delta_north_m = current_speed_mps * dt * math.cos(adjusted_bearing)
+                    delta_east_m = current_speed_mps * dt * math.sin(adjusted_bearing)
                     st.lat = st.lat + (delta_north_m / METERS_PER_DEGREE_LAT)
                     st.lon = st.lon + (delta_east_m / meters_per_degree_lon(st.lat))
                     lat, lon = st.lat, st.lon
 
-                # GPS noise (meters -> degrees)
+                # GPS noise (meters -> degrees) - เพิ่ม noise ให้มากขึ้น
                 if args.noise_level_m > 0.0:
+                    # เพิ่ม noise ให้มีการเปลี่ยนแปลงมากขึ้น แต่ไม่เว่อ
                     noise_north_m = random.gauss(0.0, args.noise_level_m)
                     noise_east_m = random.gauss(0.0, args.noise_level_m)
                     lat += noise_north_m / METERS_PER_DEGREE_LAT
                     lon += noise_east_m / meters_per_degree_lon(lat)
+                    
+                    # เพิ่มการเปลี่ยนแปลงตำแหน่งเล็กน้อยเพิ่มเติม (เพื่อให้เห็นการเปลี่ยนแปลงชัดเจนขึ้น)
+                    # เพิ่มการเปลี่ยนแปลงแบบสุ่มเล็กน้อย ±2-4 เมตร
+                    additional_north = random.uniform(-4.0, 4.0)  # ±4 เมตร
+                    additional_east = random.uniform(-4.0, 4.0)   # ±4 เมตร
+                    lat += additional_north / METERS_PER_DEGREE_LAT
+                    lon += additional_east / meters_per_degree_lon(lat)
 
-                # altitude wobble
+                # altitude wobble - เพิ่มการเปลี่ยนแปลงอัลติจูด
                 t = time.time()
                 wobble_phase = st.angle_rad if st.motion == "circle" else t
-                alt = st.base_alt_m + st.wobble_m * math.sin(wobble_phase)
+                # เพิ่มการเปลี่ยนแปลงอัลติจูดให้มากขึ้น (sin wave + random variation)
+                base_wobble = st.wobble_m * math.sin(wobble_phase)
+                random_alt_variation = random.uniform(-2.0, 2.0)  # ±2 เมตร random variation
+                alt = st.base_alt_m + base_wobble + random_alt_variation
 
                 # bbox + confidence from distance and speed (using m/s for calculations)
                 dx_east_m, dy_north_m = latlon_to_m_offsets(lat, lon, args.center_lat, args.center_lon)
@@ -383,17 +416,11 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
                 )
 
             # New structure payload
+            # Note: token_id is just the token string - camera_info will be fetched by backend from API
             payload = {
                 "fram_id": str(frame_id),  # Changed from frame_id (int) to fram_id (string)
                 "cam_id": args.cam_id,  # Changed from source_id to cam_id
-                "token_id": {
-                    "camera_info": {
-                        "name": args.camera_name,
-                        "sort": args.camera_sort,
-                        "location": args.camera_location,
-                        "institute": args.camera_institute,
-                    }
-                },
+                "token_id": args.token,  # Just the token string - backend will fetch camera_info from API
                 "timestamp": now_iso,
                 "image_info": {
                     "width": IMAGE_WIDTH,
@@ -402,16 +429,23 @@ def frames_loop(client: mqtt.Client, args: argparse.Namespace) -> int:
                 "objects": objects,
             }
 
-            info = client.publish(args.topic, json.dumps(payload), qos=args.qos, retain=args.retain)
+            payload_json = json.dumps(payload)
+            info = client.publish(args.topic, payload_json, qos=args.qos, retain=args.retain)
+            
             if info.rc != mqtt.MQTT_ERR_SUCCESS:
-                print(f"Publish failed with code {info.rc}", file=sys.stderr)
+                print(f"❌ Publish failed with code {info.rc}", file=sys.stderr)
+            else:
+                # Print status every 10 frames or on first frame
+                if frame_id % 10 == 0 or frame_id == 0:
+                    print(f"📤 Frame {frame_id}: Published {len(objects)} objects to {args.topic}")
 
             frame_id += 1
             if updates_remaining:
                 updates_remaining -= 1
             time.sleep(dt)
     except KeyboardInterrupt:
-        print("\nStopped by user.")
+        print(f"\n\n⏹️  Stopped by user.")
+        print(f"   Total frames published: {frame_id}")
     finally:
         client.loop_stop()
         client.disconnect()
@@ -471,10 +505,28 @@ def main() -> int:
     if args.username:
         client.username_pw_set(args.username, password=args.password)
 
+    # Add connection callbacks for better feedback
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            print(f"✅ Connected to MQTT broker at {args.host}:{args.port}")
+        else:
+            print(f"❌ Failed to connect to MQTT broker. Return code: {rc}", file=sys.stderr)
+    
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            print(f"⚠️  Unexpected disconnection from MQTT broker", file=sys.stderr)
+        else:
+            print(f"👋 Disconnected from MQTT broker")
+    
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    
     try:
+        print(f"🔌 Connecting to MQTT broker at {args.host}:{args.port}...")
         client.connect(args.host, args.port, keepalive=60)
     except OSError as exc:
-        print(f"Failed to connect to MQTT broker at {args.host}:{args.port} ({exc}).", file=sys.stderr)
+        print(f"❌ Failed to connect to MQTT broker at {args.host}:{args.port} ({exc}).", file=sys.stderr)
+        print(f"   Make sure the MQTT broker is running (docker-compose up -d mqtt)", file=sys.stderr)
         return 1
 
     if args.mode == "frames":
